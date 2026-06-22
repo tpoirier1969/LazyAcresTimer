@@ -1,4 +1,4 @@
--- Lazy Acres Timer v0.1.1 Supabase schema
+-- Lazy Acres Timer v0.1.2 Supabase schema
 -- Run this in the Supabase SQL Editor when you are ready to connect the app.
 -- These tables are intentionally prefixed with lazy_timer_ because the Supabase project is shared.
 
@@ -47,6 +47,10 @@ create table if not exists public.lazy_timer_sessions (
   cap_applied boolean not null default false,
   cap_seconds integer,
   note text not null default '',
+  is_billed boolean not null default false,
+  billed_at timestamptz,
+  is_paid boolean not null default false,
+  paid_at timestamptz,
   created_offline boolean not null default false,
   manually_adjusted boolean not null default false,
   created_at timestamptz not null default now(),
@@ -54,7 +58,8 @@ create table if not exists public.lazy_timer_sessions (
   deleted_at timestamptz,
   constraint lazy_timer_sessions_nonnegative_raw check (raw_duration_seconds >= 0),
   constraint lazy_timer_sessions_nonnegative_counted check (counted_duration_seconds >= 0),
-  constraint lazy_timer_sessions_end_after_start check (ended_at is null or ended_at >= started_at)
+  constraint lazy_timer_sessions_end_after_start check (ended_at is null or ended_at >= started_at),
+  constraint lazy_timer_sessions_paid_implies_billed check (is_paid = false or is_billed = true)
 );
 
 create table if not exists public.lazy_timer_settings (
@@ -74,6 +79,7 @@ create index if not exists lazy_timer_project_types_user_idx on public.lazy_time
 create index if not exists lazy_timer_projects_user_idx on public.lazy_timer_projects(user_id, deleted_at, is_archived, last_worked_at desc);
 create index if not exists lazy_timer_sessions_user_project_idx on public.lazy_timer_sessions(user_id, project_id, deleted_at, started_at desc);
 create index if not exists lazy_timer_sessions_running_idx on public.lazy_timer_sessions(user_id, ended_at) where ended_at is null and deleted_at is null;
+create index if not exists lazy_timer_sessions_billing_idx on public.lazy_timer_sessions(user_id, is_billed, is_paid, started_at desc) where deleted_at is null;
 
 create or replace function public.lazy_timer_set_updated_at()
 returns trigger
