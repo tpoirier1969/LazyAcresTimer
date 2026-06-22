@@ -1,5 +1,5 @@
 {
-  "latestVersion": "v0.1.0",
-  "requiredVersion": "v0.1.0",
-  "releaseNotes": "Initial Lazy Acres Timer build."
+  "latestVersion": "v0.1.1",
+  "requiredVersion": "v0.1.1",
+  "releaseNotes": "Simplified project fields to requested scope: name, type, rate, status, billable, cap, landing flag, notes."
 }
