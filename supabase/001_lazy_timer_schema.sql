@@ -1,4 +1,4 @@
--- Lazy Acres Timer v0.1.0 Supabase schema
+-- Lazy Acres Timer v0.1.1 Supabase schema
 -- Run this in the Supabase SQL Editor when you are ready to connect the app.
 -- These tables are intentionally prefixed with lazy_timer_ because the Supabase project is shared.
 
@@ -20,11 +20,7 @@ create table if not exists public.lazy_timer_projects (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null references auth.users(id) on delete cascade,
   name text not null,
-  description text not null default '',
-  category text not null default '',
   status text not null default 'active',
-  client_name text not null default '',
-  location text not null default '',
   project_notes text not null default '',
   project_type_id uuid references public.lazy_timer_project_types(id) on delete set null,
   project_type_name_snapshot text not null default '',
