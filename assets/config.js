@@ -4,5 +4,4 @@
 window.LAZY_TIMER_CONFIG = {
   supabaseUrl: 'https://wntakzfoprthwggkidyq.supabase.co',
   supabaseAnonKey: 'sb_publishable_gWu_EQ1J3s0iNjeDeINJwQ_xKy8QgAJ',
-  supabaseClientUrl: 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm',
 };
