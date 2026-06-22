@@ -1,204 +1,80 @@
-const config = window.LAZY_TIMER_CONFIG || {};
-const APP_VERSION = config.appVersion || 'v0.1.0';
-const STORAGE_PREFIX = 'lazy-acres-timer-v1';
+const CFG = window.LAZY_TIMER_CONFIG || {};
+const APP_VERSION = CFG.appVersion || 'v0.1.0';
+const ROOT = document.querySelector('[data-app-root]');
+const STORE_PREFIX = 'lazy-acres-timer-v1';
 const PROFILE_KEY = 'lazy-acres-timer-profile';
 const THEME_KEY = 'lazy-acres-timer-theme';
-const DEFAULT_CAP_SECONDS = 10 * 60 * 60;
-const DEFAULT_IDLE_MINUTES = 120;
+const CAP_SECONDS = 36000;
+const IDLE_MINUTES = 120;
+const TABS = ['timers', 'reports', 'stopwatch', 'countdown', 'timecode', 'settings'];
+let profile = localStorage.getItem(PROFILE_KEY) || 'tod';
+let theme = localStorage.getItem(THEME_KEY) || 'field';
+let route = parseRoute();
+let data = loadData();
+let stopwatch = { running: false, started: 0, elapsed: 0 };
+let countdown = { running: false, started: 0, duration: 900000, remaining: 900000 };
+let notice = '';
 
-const appRoot = document.querySelector('[data-app-root]');
-
-let activeProfile = localStorage.getItem(PROFILE_KEY) || 'tod';
-let activeTheme = localStorage.getItem(THEME_KEY) || 'field';
-let state = loadState();
-let currentRoute = parseRoute();
-let renderTimer = 0;
-let stopwatch = { running: false, startedAt: 0, elapsedMs: 0 };
-let countdown = { running: false, startedAt: 0, durationMs: 15 * 60 * 1000, remainingMs: 15 * 60 * 1000 };
-let supabaseClientPromise = null;
-let lastToast = '';
-
-const TABS = [
-  ['timers', 'Timers'],
-  ['reports', 'Reports'],
-  ['stopwatch', 'Stopwatch'],
-  ['countdown', 'Countdown'],
-  ['timecode', 'Time Code'],
-  ['settings', 'Settings'],
-];
-
-function escapeHtml(value) {
-  return String(value ?? '')
-    .replaceAll('&', '&amp;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;')
-    .replaceAll('"', '&quot;')
-    .replaceAll("'", '&#039;');
-}
-
-function uid() {
-  if (crypto?.randomUUID) return crypto.randomUUID();
-  return `id-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-}
-
-function nowIso() {
-  return new Date().toISOString();
-}
-
-function storageKey(profile = activeProfile) {
-  return `${STORAGE_PREFIX}:${profile}`;
-}
-
-function defaultState() {
-  const now = nowIso();
-  const millingId = uid();
-  const computerId = uid();
-  return {
-    projectTypes: [
-      { id: millingId, name: 'Milling', defaultHourlyRate: 100, isArchived: false, sortOrder: 10, createdAt: now, updatedAt: now, deletedAt: null },
-      { id: computerId, name: 'Computer Work', defaultHourlyRate: 25, isArchived: false, sortOrder: 20, createdAt: now, updatedAt: now, deletedAt: null },
-    ],
-    projects: [],
-    sessions: [],
-    settings: { idleWarningMinutes: DEFAULT_IDLE_MINUTES, defaultCapSeconds: DEFAULT_CAP_SECONDS, createdAt: now, updatedAt: now, deletedAt: null },
-    sync: { dirty: false, lastSyncedAt: null, message: 'Local mode', pendingChanges: 0 },
-    ui: { acknowledgedIdleBlocks: {} },
-  };
-}
-
-function loadState() {
-  try {
-    const parsed = JSON.parse(localStorage.getItem(storageKey()) || 'null');
-    const base = defaultState();
-    if (!parsed || typeof parsed !== 'object') return base;
-    return normalizeState({ ...base, ...parsed });
-  } catch {
-    return defaultState();
-  }
-}
-
-function normalizeState(input) {
-  const base = defaultState();
-  const next = {
-    projectTypes: Array.isArray(input.projectTypes) ? input.projectTypes : base.projectTypes,
-    projects: Array.isArray(input.projects) ? input.projects : [],
-    sessions: Array.isArray(input.sessions) ? input.sessions : [],
-    settings: { ...base.settings, ...(input.settings || {}) },
-    sync: { ...base.sync, ...(input.sync || {}) },
-    ui: { ...base.ui, ...(input.ui || {}) },
-  };
-  if (!next.projectTypes.filter((type) => !type.deletedAt).some((type) => type.name === 'Milling')) {
-    next.projectTypes.push({ id: uid(), name: 'Milling', defaultHourlyRate: 100, isArchived: false, sortOrder: 10, createdAt: nowIso(), updatedAt: nowIso(), deletedAt: null });
-  }
-  if (!next.projectTypes.filter((type) => !type.deletedAt).some((type) => type.name === 'Computer Work')) {
-    next.projectTypes.push({ id: uid(), name: 'Computer Work', defaultHourlyRate: 25, isArchived: false, sortOrder: 20, createdAt: nowIso(), updatedAt: nowIso(), deletedAt: null });
-  }
-  return next;
-}
-
-function saveState({ dirty = true, message = '' } = {}) {
-  if (dirty) {
-    state.sync.dirty = true;
-    state.sync.pendingChanges = (state.sync.pendingChanges || 0) + 1;
-  }
-  if (message) state.sync.message = message;
-  localStorage.setItem(storageKey(), JSON.stringify(state));
-}
-
-function switchProfile(profile) {
-  activeProfile = profile;
-  localStorage.setItem(PROFILE_KEY, profile);
-  state = loadState();
-  navigate('timers');
-}
-
-function applyTheme() {
-  document.documentElement.dataset.theme = activeTheme === 'dark' ? 'dark' : 'field';
-}
-
-function setTheme(theme) {
-  activeTheme = theme === 'dark' ? 'dark' : 'field';
-  localStorage.setItem(THEME_KEY, activeTheme);
-  render();
-}
-
-function parseRoute(hash = window.location.hash) {
-  const parts = hash.replace(/^#\/?/, '').split('/').filter(Boolean);
-  if (parts[0] === 'project' && parts[1]) return { tab: 'timers', projectId: parts[1] };
-  const tab = TABS.some(([id]) => id === parts[0]) ? parts[0] : 'timers';
-  return { tab, projectId: null };
-}
-
-function navigate(tabOrHash) {
-  const hash = String(tabOrHash || 'timers').startsWith('#') ? tabOrHash : `#/${tabOrHash}`;
-  window.location.hash = hash;
-}
-
-function liveElapsedSeconds(session, at = Date.now()) {
-  const start = new Date(session.startedAt).getTime();
-  const end = session.endedAt ? new Date(session.endedAt).getTime() : at;
-  return Math.max(0, Math.floor((end - start) / 1000));
-}
-
-function getProject(projectId) {
-  return state.projects.find((project) => project.id === projectId && !project.deletedAt) || null;
-}
-
-function getProjectType(typeId) {
-  return state.projectTypes.find((type) => type.id === typeId && !type.deletedAt) || null;
-}
-
-function activeSessions() {
-  return state.sessions.filter((session) => !session.deletedAt && !session.endedAt).sort((a, b) => new Date(a.startedAt) - new Date(b.startedAt));
-}
-
-function projectSessions(projectId, includeDeleted = false) {
-  return state.sessions
-    .filter((session) => session.projectId === projectId && (includeDeleted || !session.deletedAt))
-    .sort((a, b) => new Date(b.startedAt) - new Date(a.startedAt));
-}
-
-function projectRawSeconds(projectId, at = Date.now()) {
-  return projectSessions(projectId).reduce((sum, session) => sum + liveElapsedSeconds(session, at), 0);
-}
-
-function countedSecondsForSession(session, project = getProject(session.projectId), at = Date.now()) {
-  const raw = liveElapsedSeconds(session, at);
-  const cap = Number(session.capSeconds || state.settings.defaultCapSeconds || DEFAULT_CAP_SECONDS);
-  if (project?.useTenHourCap && cap > 0) return Math.min(raw, cap);
-  return raw;
-}
-
-function projectCountedSeconds(projectId, at = Date.now()) {
-  const project = getProject(projectId);
-  return projectSessions(projectId).reduce((sum, session) => sum + countedSecondsForSession(session, project, at), 0);
-}
-
-function projectCharge(projectId, at = Date.now()) {
-  const project = getProject(projectId);
-  if (!project?.isBillable) return 0;
-  return (projectCountedSeconds(projectId, at) / 3600) * Number(project.hourlyRate || 0);
-}
-
-function formatDuration(totalSeconds) {
-  const seconds = Math.max(0, Math.floor(totalSeconds || 0));
-  const h = Math.floor(seconds / 3600);
-  const m = Math.floor((seconds % 3600) / 60);
-  const s = seconds % 60;
-  if (h > 0) return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
-  return `${m}:${String(s).padStart(2, '0')}`;
-}
-
-function formatDurationLong(totalSeconds) {
-  const seconds = Math.max(0, Math.floor(totalSeconds || 0));
-  const h = Math.floor(seconds / 3600);
-  const m = Math.floor((seconds % 3600) / 60);
-  if (h && m) return `${h}h ${m}m`;
-  if (h) return `${h}h`;
-  if (m) return `${m}m`;
-  return `${seconds % 60}s`;
-}
-
-function formatMoney(value) {
-  return Number(value || 0).toLocaleString(undefined, { style: 'currency', currency: 'USD' });
-}\n
+function esc(v) { return String(v ?? '').replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;').replaceAll("'", '&#039;'); }
+function id() { return crypto?.randomUUID ? crypto.randomUUID() : `id-${Date.now()}-${Math.random().toString(16).slice(2)}`; }
+function now() { return new Date().toISOString(); }
+function key() { return `${STORE_PREFIX}:${profile}`; }
+function money(n) { return Number(n || 0).toLocaleString(undefined, { style: 'currency', currency: 'USD' }); }
+function dur(seconds) { seconds = Math.max(0, Math.floor(seconds || 0)); const h = Math.floor(seconds / 3600); const m = Math.floor((seconds % 3600) / 60); const s = seconds % 60; return h ? `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}` : `${m}:${String(s).padStart(2, '0')}`; }
+function durLong(seconds) { seconds = Math.max(0, Math.floor(seconds || 0)); const h = Math.floor(seconds / 3600); const m = Math.floor((seconds % 3600) / 60); if (h && m) return `${h}h ${m}m`; if (h) return `${h}h`; if (m) return `${m}m`; return `${seconds % 60}s`; }
+function dt(iso) { return iso ? new Date(iso).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : 'Running'; }
+function inputDT(iso) { if (!iso) return ''; const d = new Date(iso); return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16); }
+function fromInput(v) { return v ? new Date(v).toISOString() : null; }
+function activeTheme() { document.documentElement.dataset.theme = theme === 'dark' ? 'dark' : 'field'; }
+function parseRoute() { const p = location.hash.replace(/^#\/?/, '').split('/').filter(Boolean); return p[0] === 'project' && p[1] ? { tab: 'timers', project: p[1] } : { tab: TABS.includes(p[0]) ? p[0] : 'timers', project: null }; }
+function nav(to) { location.hash = `#/${to || 'timers'}`; }
+function defaultData() { const t = now(); const milling = id(); const computer = id(); return { types: [{ id: milling, name: 'Milling', rate: 100, archived: false, sort: 10, updated: t, deleted: null }, { id: computer, name: 'Computer Work', rate: 25, archived: false, sort: 20, updated: t, deleted: null }], projects: [], sessions: [], settings: { idleMinutes: IDLE_MINUTES, capSeconds: CAP_SECONDS, updated: t }, sync: { dirty: false, count: 0, message: 'Local mode', last: null }, ui: { idleAck: {} } }; }
+function loadData() { try { const loaded = JSON.parse(localStorage.getItem(key()) || 'null'); const d = loaded && typeof loaded === 'object' ? { ...defaultData(), ...loaded } : defaultData(); d.types ||= []; d.projects ||= []; d.sessions ||= []; d.settings = { ...defaultData().settings, ...(d.settings || {}) }; d.sync = { ...defaultData().sync, ...(d.sync || {}) }; d.ui = { idleAck: {}, ...(d.ui || {}) }; if (!d.types.some(t => !t.deleted && t.name === 'Milling')) d.types.push({ id: id(), name: 'Milling', rate: 100, archived: false, sort: 10, updated: now(), deleted: null }); if (!d.types.some(t => !t.deleted && t.name === 'Computer Work')) d.types.push({ id: id(), name: 'Computer Work', rate: 25, archived: false, sort: 20, updated: now(), deleted: null }); return d; } catch { return defaultData(); } }
+function save(dirty = true, msg = '') { if (dirty) { data.sync.dirty = true; data.sync.count = (data.sync.count || 0) + 1; } if (msg) data.sync.message = msg; localStorage.setItem(key(), JSON.stringify(data)); }
+function typeById(typeId) { return data.types.find(t => t.id === typeId && !t.deleted) || null; }
+function projectById(projectId) { return data.projects.find(p => p.id === projectId && !p.deleted) || null; }
+function sessionsFor(projectId) { return data.sessions.filter(s => s.projectId === projectId && !s.deleted).sort((a, b) => new Date(b.started) - new Date(a.started)); }
+function running() { return data.sessions.filter(s => !s.deleted && !s.ended).sort((a, b) => new Date(a.started) - new Date(b.started)); }
+function elapsed(session, at = Date.now()) { const end = session.ended ? new Date(session.ended).getTime() : at; return Math.max(0, Math.floor((end - new Date(session.started).getTime()) / 1000)); }
+function counted(session, project = projectById(session.projectId)) { const raw = elapsed(session); return project?.useCap ? Math.min(raw, Number(data.settings.capSeconds || CAP_SECONDS)) : raw; }
+function projectSeconds(projectId) { const p = projectById(projectId); return sessionsFor(projectId).reduce((sum, s) => sum + counted(s, p), 0); }
+function projectRaw(projectId) { return sessionsFor(projectId).reduce((sum, s) => sum + elapsed(s), 0); }
+function charge(projectId) { const p = projectById(projectId); return p?.billable ? projectSeconds(projectId) / 3600 * Number(p.rate || 0) : 0; }
+function orderedProjects(includeArchived = false) { return data.projects.filter(p => !p.deleted && (includeArchived || !p.archived)).sort((a, b) => Number(!!running().find(s => s.projectId === b.id)) - Number(!!running().find(s => s.projectId === a.id)) || new Date(b.lastWorked || b.updated || b.created) - new Date(a.lastWorked || a.updated || a.created)); }
+function activeTypes() { return data.types.filter(t => !t.deleted && !t.archived).sort((a, b) => a.sort - b.sort || a.name.localeCompare(b.name)); }
+function startProject(projectId) { const p = projectById(projectId); if (!p) return; const t = now(); data.sessions.push({ id: id(), projectId, started: t, ended: null, note: '', capSeconds: p.useCap ? data.settings.capSeconds : null, manual: false, offline: true, created: t, updated: t, deleted: null }); p.lastWorked = t; p.updated = t; save(true, `Started ${p.name}`); render(); }
+function stopSession(sessionId, stopAt = new Date()) { const s = data.sessions.find(x => x.id === sessionId && !x.deleted); if (!s || s.ended) return; const p = projectById(s.projectId); s.ended = stopAt.toISOString(); s.rawSeconds = elapsed(s); s.countedSeconds = counted(s, p); s.capApplied = s.countedSeconds < s.rawSeconds; s.updated = now(); if (p) { p.lastWorked = s.ended; p.updated = now(); } save(true, `Stopped ${p?.name || 'timer'}`); render(); }
+function toggleProject(projectId) { const r = running().find(s => s.projectId === projectId); r ? stopSession(r.id) : startProject(projectId); }
+function renderShell(content) { activeTheme(); const syncLabel = !navigator.onLine ? 'Offline' : data.sync.dirty ? `${data.sync.count || 1} local` : data.sync.last ? 'Synced' : 'Local'; ROOT.innerHTML = `<div class="app-shell"><header class="app-header"><a class="brand" href="#/timers"><span class="brand-mark">LA</span><span><strong>Lazy Acres Timer</strong><small>Project and job time</small></span></a><nav class="nav-tabs">${TABS.map(t => `<button class="nav-tab${route.tab === t && !route.project ? ' nav-tab-active' : ''}" data-nav="${t}">${label(t)}</button>`).join('')}</nav><div class="header-actions"><select class="user-select" data-profile><option value="tod"${profile === 'tod' ? ' selected' : ''}>Tod</option><option value="donna"${profile === 'donna' ? ' selected' : ''}>Donna</option><option value="guest"${profile === 'guest' ? ' selected' : ''}>Guest</option></select><button class="sync-pill ${data.sync.dirty ? 'dirty' : ''}" data-sync>${esc(syncLabel)}</button><button class="version-pill" data-theme>${theme === 'dark' ? 'Aurora' : 'Field'}</button><span class="version-pill">${APP_VERSION}</span></div></header><main class="main-view">${notice ? `<div class="notice"><strong>${esc(notice)}</strong><button class="button button-small button-ghost" data-clear>Dismiss</button></div>` : ''}${idleWarnings()}${content}</main></div>`; bindCommon(); }
+function label(tab) { return { timers: 'Timers', reports: 'Reports', stopwatch: 'Stopwatch', countdown: 'Countdown', timecode: 'Time Code', settings: 'Settings' }[tab] || tab; }
+function bindCommon() { ROOT.querySelectorAll('[data-nav]').forEach(b => b.onclick = () => nav(b.dataset.nav)); ROOT.querySelector('[data-profile]')?.addEventListener('change', e => { profile = e.target.value; localStorage.setItem(PROFILE_KEY, profile); data = loadData(); nav('timers'); }); ROOT.querySelector('[data-theme]')?.addEventListener('click', () => { theme = theme === 'dark' ? 'field' : 'dark'; localStorage.setItem(THEME_KEY, theme); render(); }); ROOT.querySelector('[data-clear]')?.addEventListener('click', () => { notice = ''; render(); }); ROOT.querySelectorAll('[data-start]').forEach(b => b.onclick = () => startProject(b.dataset.start)); ROOT.querySelectorAll('[data-toggle]').forEach(b => b.onclick = () => toggleProject(b.dataset.toggle)); ROOT.querySelectorAll('[data-stop]').forEach(b => b.onclick = () => stopSession(b.dataset.stop)); ROOT.querySelectorAll('[data-open]').forEach(b => b.onclick = () => nav(`project/${b.dataset.open}`)); ROOT.querySelector('[data-sync]')?.addEventListener('click', syncNow); ROOT.querySelectorAll('[data-ack]').forEach(b => b.onclick = () => { data.ui.idleAck[b.dataset.ack] = true; save(false); render(); }); ROOT.querySelectorAll('[data-stop-offset]').forEach(b => b.onclick = () => stopSession(b.dataset.session, new Date(Date.now() - Number(b.dataset.stopOffset) * 60000))); }
+function idleWarnings() { const mins = Number(data.settings.idleMinutes || IDLE_MINUTES); return running().map(s => { const block = Math.floor(elapsed(s) / 60 / mins); if (block < 1) return ''; const key = `${s.id}:${block}`; if (data.ui.idleAck?.[key]) return ''; const p = projectById(s.projectId); const cap = p?.useCap && elapsed(s) >= Number(data.settings.capSeconds || CAP_SECONDS); return `<div class="notice${cap ? ' notice-danger' : ''}"><div><strong>${esc(p?.name || 'Timer')} has been running ${durLong(elapsed(s))}.</strong><span>${cap ? '10-hour cap reached.' : 'Still working on it?'}</span></div><div class="project-actions"><button class="button button-small" data-ack="${esc(key)}">Keep running</button><button class="button button-small" data-stop="${esc(s.id)}">Stop now</button><button class="button button-small" data-session="${esc(s.id)}" data-stop-offset="30">Stop 30m ago</button></div></div>`; }).join(''); }
+function renderTimers() { const projects = orderedProjects(); return `<section class="panel"><div class="panel-header"><div><p class="eyebrow">Timers</p><h1>Projects / Jobs</h1><p>Start/stop here. Click Open for notes, billing, sessions, and project details.</p></div><button class="button button-primary" data-new-project>New Project</button></div>${running().length ? `<div class="running-list">${running().map(renderRunning).join('')}</div>` : '<p class="muted">No timers running.</p>'}</section><section class="panel"><div class="panel-header"><div><h2>Active projects</h2><p>Quick buttons for the normal case. Multiple timers are allowed when needed.</p></div></div><div class="project-list">${projects.map(renderProjectRow).join('') || '<p class="muted">No projects yet.</p>'}</div></section>${projectDialog()}`; }
+function renderRunning(s) { const p = projectById(s.projectId); const raw = elapsed(s); const cnt = counted(s, p); return `<article class="timer-row"><div class="project-main"><button class="project-title" data-open="${esc(s.projectId)}">${esc(p?.name || 'Unknown')}</button><div class="project-meta"><span class="timer-readout">${dur(raw)}</span>${cnt < raw ? '<span class="cap-chip cap-reached">10h cap</span>' : ''}<span class="charge-readout">${money(charge(s.projectId))}</span></div></div><div class="project-actions"><button class="button button-danger" data-stop="${esc(s.id)}">Stop</button><button class="button" data-open="${esc(s.projectId)}">Open</button></div></article>`; }
+function renderProjectRow(p) { const r = running().filter(s => s.projectId === p.id); const t = typeById(p.typeId); return `<article class="project-card"><div class="project-main"><button class="project-title" data-open="${esc(p.id)}">${esc(p.name)}</button><div class="project-meta"><span>${esc(t?.name || p.typeName || 'No type')}</span><span>${p.billable ? `${money(p.rate)}/hr` : 'Not billable'}</span><span>${durLong(projectSeconds(p.id))}</span><span class="charge-readout">${money(charge(p.id))}</span>${p.useCap ? '<span class="cap-chip">10h cap</span>' : '<span class="cap-chip">No cap</span>'}</div></div><div class="project-actions">${r.length ? `<span class="timer-readout">${dur(elapsed(r[0]))}</span><button class="button button-danger" data-toggle="${esc(p.id)}">Stop</button>` : `<button class="button button-primary" data-toggle="${esc(p.id)}">Start</button>`}${r.length > 1 ? `<span class="status-chip">+${r.length - 1} more</span>` : ''}<button class="button" data-open="${esc(p.id)}">Open</button></div></article>`; }
+function projectDialog() { return `<div class="dialog-backdrop" data-dialog hidden><section class="dialog-card"><div class="panel-header"><div><p class="eyebrow">New</p><h2>Create Project / Job</h2></div><button class="button button-ghost" data-close>Close</button></div><form data-project-form>${projectFields()}<div class="form-actions"><button class="button button-primary">Create Project</button></div></form></section></div>`; }
+function projectFields(p = null) { const typeId = p?.typeId || activeTypes()[0]?.id || ''; const type = typeById(typeId); const rate = p ? p.rate : Number(type?.rate || 0); return `<div class="form-grid"><div class="field full"><label>Name</label><input class="input" name="name" required value="${esc(p?.name || '')}" placeholder="History Museum Kiosk"></div><div class="field"><label>Type</label><select class="input" name="typeId" data-rate-source>${activeTypes().map(t => `<option value="${esc(t.id)}" data-rate="${esc(t.rate)}"${typeId === t.id ? ' selected' : ''}>${esc(t.name)} — ${money(t.rate)}/hr</option>`).join('')}</select></div><div class="field"><label>Hourly rate</label><input class="input" name="rate" type="number" min="0" step="0.01" value="${esc(rate)}"></div><div class="field"><label>Category</label><input class="input" name="category" value="${esc(p?.category || '')}"></div><div class="field"><label>Client / organization</label><input class="input" name="client" value="${esc(p?.client || '')}"></div><div class="field"><label>Location</label><input class="input" name="location" value="${esc(p?.location || '')}"></div><div class="field"><label>Status</label><input class="input" name="status" value="${esc(p?.status || 'active')}"></div><div class="field"><label>Description</label><input class="input" name="description" value="${esc(p?.description || '')}"></div><label class="check-field"><input type="checkbox" name="billable"${p?.billable === false ? '' : ' checked'}> Billable</label><label class="check-field"><input type="checkbox" name="useCap"${p?.useCap === false ? '' : ' checked'}> Use 10-hour cap</label><label class="check-field"><input type="checkbox" name="landing"${p?.landing ? ' checked' : ''}> Show on Lazy Acres landing page</label><div class="field full"><label>Project notes</label><textarea class="input" name="notes">${esc(p?.notes || '')}</textarea></div></div>`; }
+function bindTimers() { const dialog = ROOT.querySelector('[data-dialog]'); ROOT.querySelector('[data-new-project]')?.addEventListener('click', () => dialog.hidden = false); ROOT.querySelector('[data-close]')?.addEventListener('click', () => dialog.hidden = true); bindRateSource(ROOT); ROOT.querySelector('[data-project-form]')?.addEventListener('submit', e => { e.preventDefault(); const f = new FormData(e.currentTarget); const t = typeById(f.get('typeId')); const stamp = now(); const p = { id: id(), name: String(f.get('name') || '').trim(), typeId: String(f.get('typeId') || ''), typeName: t?.name || '', rate: Number(f.get('rate') || 0), category: String(f.get('category') || ''), client: String(f.get('client') || ''), location: String(f.get('location') || ''), status: String(f.get('status') || 'active'), description: String(f.get('description') || ''), notes: String(f.get('notes') || ''), billable: !!f.get('billable'), useCap: !!f.get('useCap'), landing: !!f.get('landing'), archived: false, sort: Date.now(), created: stamp, updated: stamp, lastWorked: null, deleted: null }; if (!p.name) return; data.projects.push(p); save(true, 'Project created'); nav(`project/${p.id}`); }); }
+function bindRateSource(root) { root.querySelector('[data-rate-source]')?.addEventListener('change', e => { const rate = e.target.selectedOptions[0]?.dataset.rate; const input = root.querySelector('input[name="rate"]'); if (input && rate !== undefined) input.value = rate; }); }
+function renderProject(projectId) { const p = projectById(projectId); if (!p) return `<section class="panel"><h1>Project not found</h1><p class="muted">Wrong profile, deleted, or a small database troll.</p><button class="button" data-nav="timers">Back</button></section>`; const r = running().filter(s => s.projectId === p.id); return `<section class="panel"><div class="panel-header"><div><p class="eyebrow">Project / Job</p><h1>${esc(p.name)}</h1><p>${esc(p.description || 'Project workspace, notes, sessions, and billing.')}</p></div><div class="project-actions"><button class="button" data-nav="timers">Back</button>${r.length ? `<button class="button button-danger" data-stop="${esc(r[0].id)}">Stop</button>` : `<button class="button button-primary" data-start="${esc(p.id)}">Start</button>`}</div></div><div class="grid-three"><div class="stat-card"><small>${r.length ? 'Running' : 'Time'}</small><strong class="timer-readout">${r.length ? dur(elapsed(r[0])) : durLong(projectSeconds(p.id))}</strong></div><div class="stat-card"><small>Billable time</small><strong>${durLong(projectSeconds(p.id))}</strong></div><div class="stat-card"><small>Total charge</small><strong>${money(charge(p.id))}</strong></div></div></section><section class="grid-two"><article class="panel"><div class="panel-header"><div><h2>Project details</h2><p>Rates copy from type, then can be overridden.</p></div></div><form data-edit-project>${projectFields(p)}<div class="form-actions"><button class="button button-primary">Save Project</button><button class="button" type="button" data-archive>${p.archived ? 'Restore' : 'Archive'}</button><button class="button button-danger" type="button" data-delete-project>Delete</button></div></form></article><article class="panel"><div class="panel-header"><div><h2>Notes</h2><p>Wide-open project notes. Session notes are below.</p></div></div><form data-notes><textarea class="input" name="notes" rows="16">${esc(p.notes || '')}</textarea><div class="form-actions"><button class="button button-primary">Save Notes</button></div></form></article></section><section class="panel"><div class="panel-header"><div><h2>Sessions</h2><p>Manual edits live here.</p></div><button class="button button-primary" data-add-session>Add Session</button></div><div class="report-table-wrap">${sessionsTable(p.id)}</div></section>${sessionDialog()}`; }
+function sessionsTable(projectId) { const p = projectById(projectId); return `<table><thead><tr><th>Started</th><th>Ended</th><th>Raw</th><th>Counted</th><th>Note</th><th>Actions</th></tr></thead><tbody>${sessionsFor(projectId).map(s => { const raw = elapsed(s); const cnt = counted(s, p); return `<tr><td>${dt(s.started)}</td><td>${dt(s.ended)}</td><td>${durLong(raw)}</td><td>${durLong(cnt)}${cnt < raw ? ' <span class="cap-chip cap-reached">capped</span>' : ''}</td><td>${esc(s.note || '')}</td><td><div class="session-actions"><button class="button button-small" data-edit-session="${esc(s.id)}">Edit</button><button class="button button-small button-danger" data-delete-session="${esc(s.id)}">Delete</button></div></td></tr>`; }).join('') || '<tr><td colspan="6">No sessions yet.</td></tr>'}</tbody></table>`; }
+function sessionDialog() { return `<div class="dialog-backdrop" data-session-dialog hidden><section class="dialog-card"><div class="panel-header"><div><p class="eyebrow">Session</p><h2 data-session-title>Add Session</h2></div><button class="button button-ghost" data-close-session>Close</button></div><form data-session-form data-session-id=""><div class="form-grid"><div class="field"><label>Started</label><input class="input" name="started" type="datetime-local" required></div><div class="field"><label>Ended</label><input class="input" name="ended" type="datetime-local"></div><div class="field full"><label>Session note</label><textarea class="input" name="note"></textarea></div></div><div class="form-actions"><button class="button button-primary">Save Session</button></div></form></section></div>`; }
+function bindProject(projectId) { const p = projectById(projectId); bindRateSource(ROOT); ROOT.querySelector('[data-edit-project]')?.addEventListener('submit', e => { e.preventDefault(); const f = new FormData(e.currentTarget); const t = typeById(f.get('typeId')); Object.assign(p, { name: String(f.get('name') || '').trim(), typeId: String(f.get('typeId') || ''), typeName: t?.name || p.typeName || '', rate: Number(f.get('rate') || 0), category: String(f.get('category') || ''), client: String(f.get('client') || ''), location: String(f.get('location') || ''), status: String(f.get('status') || 'active'), description: String(f.get('description') || ''), notes: String(f.get('notes') || ''), billable: !!f.get('billable'), useCap: !!f.get('useCap'), landing: !!f.get('landing'), updated: now() }); save(true, 'Project saved'); render(); }); ROOT.querySelector('[data-notes]')?.addEventListener('submit', e => { e.preventDefault(); p.notes = String(new FormData(e.currentTarget).get('notes') || ''); p.updated = now(); save(true, 'Notes saved'); render(); }); ROOT.querySelector('[data-archive]')?.addEventListener('click', () => { p.archived = !p.archived; p.updated = now(); save(true, p.archived ? 'Project archived' : 'Project restored'); render(); }); ROOT.querySelector('[data-delete-project]')?.addEventListener('click', () => { if (confirm(`Delete ${p.name} and its sessions locally?`)) { p.deleted = now(); sessionsFor(p.id).forEach(s => s.deleted = now()); save(true, 'Project deleted'); nav('timers'); } }); ROOT.querySelector('[data-add-session]')?.addEventListener('click', () => openSession()); ROOT.querySelector('[data-close-session]')?.addEventListener('click', () => ROOT.querySelector('[data-session-dialog]').hidden = true); ROOT.querySelectorAll('[data-edit-session]').forEach(b => b.onclick = () => openSession(b.dataset.editSession)); ROOT.querySelectorAll('[data-delete-session]').forEach(b => b.onclick = () => { if (confirm('Delete this session?')) { const s = data.sessions.find(x => x.id === b.dataset.deleteSession); if (s) { s.deleted = now(); s.updated = now(); save(true, 'Session deleted'); render(); } } }); ROOT.querySelector('[data-session-form]')?.addEventListener('submit', e => saveSession(e, projectId)); }
+function openSession(sessionId = '') { const form = ROOT.querySelector('[data-session-form]'); const dialog = ROOT.querySelector('[data-session-dialog]'); const title = ROOT.querySelector('[data-session-title]'); const s = sessionId ? data.sessions.find(x => x.id === sessionId) : null; const end = new Date(); const start = new Date(end.getTime() - 3600000); form.dataset.sessionId = s?.id || ''; form.started.value = inputDT(s?.started || start.toISOString()); form.ended.value = s?.ended ? inputDT(s.ended) : (s ? '' : inputDT(end.toISOString())); form.note.value = s?.note || ''; title.textContent = s ? 'Edit Session' : 'Add Session'; dialog.hidden = false; }
+function saveSession(e, projectId) { e.preventDefault(); const form = e.currentTarget; const f = new FormData(form); const p = projectById(projectId); let s = form.dataset.sessionId ? data.sessions.find(x => x.id === form.dataset.sessionId) : null; if (!s) { s = { id: id(), projectId, created: now(), deleted: null }; data.sessions.push(s); } Object.assign(s, { started: fromInput(f.get('started')), ended: fromInput(f.get('ended')), note: String(f.get('note') || ''), manual: true, offline: true, capSeconds: p?.useCap ? data.settings.capSeconds : null, updated: now() }); s.rawSeconds = s.ended ? elapsed(s) : 0; s.countedSeconds = s.ended ? counted(s, p) : 0; s.capApplied = s.countedSeconds < s.rawSeconds; if (p) { p.lastWorked = s.ended || s.started; p.updated = now(); } save(true, 'Session saved'); render(); }
+function renderReports() { const rows = orderedProjects(true).map(p => ({ p, type: typeById(p.typeId)?.name || p.typeName || '', raw: projectRaw(p.id), counted: projectSeconds(p.id), charge: charge(p.id) })).filter(r => r.raw || r.counted || !r.p.archived); const total = rows.reduce((s, r) => s + r.counted, 0); const totalCharge = rows.reduce((s, r) => s + r.charge, 0); return `<section class="panel"><div class="panel-header"><div><p class="eyebrow">Reports</p><h1>Time and billing</h1><p>Exact time. No rounding.</p></div><button class="button button-primary" data-export>Export CSV</button></div><div class="grid-three"><div class="stat-card"><small>Projects</small><strong>${rows.length}</strong></div><div class="stat-card"><small>Billable time</small><strong>${durLong(total)}</strong></div><div class="stat-card"><small>Total charge</small><strong>${money(totalCharge)}</strong></div></div></section><section class="panel"><div class="report-table-wrap"><table><thead><tr><th>Project</th><th>Type</th><th>Raw</th><th>Counted</th><th>Rate</th><th>Billable</th><th>Charge</th></tr></thead><tbody>${rows.map(r => `<tr><td>${esc(r.p.name)}</td><td>${esc(r.type)}</td><td>${durLong(r.raw)}</td><td>${durLong(r.counted)}</td><td>${money(r.p.rate)}/hr</td><td>${r.p.billable ? 'Yes' : 'No'}</td><td>${money(r.charge)}</td></tr>`).join('') || '<tr><td colspan="7">No reportable time yet.</td></tr>'}</tbody></table></div></section>`; }
+function bindReports() { ROOT.querySelector('[data-export]')?.addEventListener('click', exportCsv); }
+function exportCsv() { const rows = orderedProjects(true).map(p => [p.name, typeById(p.typeId)?.name || p.typeName || '', projectRaw(p.id), projectSeconds(p.id), p.rate, p.billable ? 'Yes' : 'No', charge(p.id).toFixed(2)]); const csv = [['Project', 'Type', 'Raw Seconds', 'Counted Seconds', 'Hourly Rate', 'Billable', 'Charge'], ...rows].map(r => r.map(v => `"${String(v).replaceAll('"', '""')}"`).join(',')).join('\n'); const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv' })); const a = document.createElement('a'); a.href = url; a.download = `lazy-acres-timer-${new Date().toISOString().slice(0, 10)}.csv`; a.click(); URL.revokeObjectURL(url); }
+function renderStopwatch() { const ms = stopwatch.running ? stopwatch.elapsed + Date.now() - stopwatch.started : stopwatch.elapsed; return `<section class="panel tool-card"><div><p class="eyebrow">Stopwatch</p><h1 class="big-time">${dur(Math.floor(ms / 1000))}</h1></div><div class="tool-controls"><button class="button button-primary" data-sw-toggle>${stopwatch.running ? 'Pause' : 'Start'}</button><button class="button" data-sw-reset>Reset</button></div></section>`; }
+function bindStopwatch() { ROOT.querySelector('[data-sw-toggle]')?.addEventListener('click', () => { if (stopwatch.running) { stopwatch.elapsed += Date.now() - stopwatch.started; stopwatch.running = false; } else { stopwatch.started = Date.now(); stopwatch.running = true; } render(); }); ROOT.querySelector('[data-sw-reset]')?.addEventListener('click', () => { stopwatch = { running: false, started: 0, elapsed: 0 }; render(); }); }
+function renderCountdown() { const rem = countdown.running ? Math.max(0, countdown.duration - (Date.now() - countdown.started)) : countdown.remaining; return `<section class="panel tool-card"><div><p class="eyebrow">Countdown</p><h1 class="big-time">${dur(Math.ceil(rem / 1000))}</h1></div><div class="tool-controls"><input class="input countdown-preset" type="number" min="1" data-cd-min value="${Math.round(countdown.duration / 60000)}"><span class="muted">minutes</span><button class="button button-primary" data-cd-toggle>${countdown.running ? 'Pause' : 'Start'}</button><button class="button" data-cd-reset>Reset</button></div>${rem === 0 ? '<div class="notice"><strong>Time is up.</strong></div>' : ''}</section>`; }
+function bindCountdown() { ROOT.querySelector('[data-cd-min]')?.addEventListener('change', e => { const m = Math.max(1, Number(e.target.value || 1)); countdown.duration = m * 60000; countdown.remaining = countdown.duration; countdown.running = false; render(); }); ROOT.querySelector('[data-cd-toggle]')?.addEventListener('click', () => { if (countdown.running) { countdown.remaining = Math.max(0, countdown.duration - (Date.now() - countdown.started)); countdown.duration = countdown.remaining || countdown.duration; countdown.running = false; } else { countdown.started = Date.now(); countdown.duration = countdown.remaining || countdown.duration; countdown.running = true; } render(); }); ROOT.querySelector('[data-cd-reset]')?.addEventListener('click', () => { countdown.running = false; countdown.remaining = countdown.duration; render(); }); }
+function renderTimecode() { return `<section class="panel"><div class="panel-header"><div><p class="eyebrow">Time Code</p><h1>Calculator</h1><p>Basic scaffold until the old calculator gets folded in.</p></div></div><form data-tc class="timecode-grid"><div class="field"><label>A</label><input class="input" name="a" value="00:00:30:00"></div><div class="field"><label>Operation</label><select class="input" name="op"><option value="add">Add</option><option value="sub">Subtract</option></select></div><div class="field"><label>B</label><input class="input" name="b" value="00:00:15:00"></div><div class="field"><label>Frame rate</label><select class="input" name="fps"><option>23.976</option><option>24</option><option>25</option><option selected>29.97</option><option>30</option><option>59.94</option><option>60</option></select></div><div class="full form-actions"><button class="button button-primary">Calculate</button></div></form><div class="result-box" data-tc-result>Result: —</div></section>`; }
+function parseTC(v, fps) { const m = String(v || '').trim().match(/^(\d+):(\d{2}):(\d{2})(?::(\d{2}))?$/); if (!m) return null; const f = Math.round(Number(fps)); return (((Number(m[1]) * 60 + Number(m[2])) * 60 + Number(m[3])) * f) + Number(m[4] || 0); }
+function tc(frames, fps) { const f = Math.round(Number(fps)); const sign = frames < 0 ? '-' : ''; let n = Math.abs(frames); const h = Math.floor(n / (f * 3600)); n -= h * f * 3600; const m = Math.floor(n / (f * 60)); n -= m * f * 60; const s = Math.floor(n / f); const ff = n - s * f; return `${sign}${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}:${String(ff).padStart(2, '0')}`; }
+function bindTimecode() { ROOT.querySelector('[data-tc]')?.addEventListener('submit', e => { e.preventDefault(); const f = new FormData(e.currentTarget); const fps = Number(f.get('fps')); const a = parseTC(f.get('a'), fps); const b = parseTC(f.get('b'), fps); const box = ROOT.querySelector('[data-tc-result]'); if (a === null || b === null) { box.textContent = 'Result: use HH:MM:SS:FF'; return; } const frames = f.get('op') === 'sub' ? a - b : a + b; box.textContent = `Result: ${tc(frames, fps)} (${frames} frames @ ${fps})`; }); }
+function renderSettings() { return `<section class="grid-two"><article class="panel"><div class="panel-header"><div><p class="eyebrow">Settings</p><h1>Timer settings</h1></div></div><form data-settings class="form-grid"><div class="field"><label>Idle warning minutes</label><input class="input" type="number" name="idle" min="1" value="${esc(data.settings.idleMinutes)}"></div><div class="field"><label>Default cap hours</label><input class="input" type="number" name="cap" min="1" step="0.25" value="${esc(Number(data.settings.capSeconds || CAP_SECONDS) / 3600)}"></div><div class="form-actions full"><button class="button button-primary">Save Settings</button></div></form></article><article class="panel"><div class="panel-header"><div><h2>Supabase sync</h2><p>We will wire this after the tables and auth settings are confirmed.</p></div></div><p class="muted">${esc(data.sync.message || 'Local mode')}</p><button class="button button-primary" data-sync>Sync now</button></article></section><section class="panel"><div class="panel-header"><div><h2>Project types</h2><p>Defaults are copied into each new project.</p></div></div><div class="project-list">${data.types.filter(t => !t.deleted).sort((a, b) => a.sort - b.sort).map(t => `<article class="project-card"><form data-type="${esc(t.id)}" class="form-grid full"><div class="field"><label>Name</label><input class="input" name="name" value="${esc(t.name)}"></div><div class="field"><label>Default hourly rate</label><input class="input" name="rate" type="number" min="0" step="0.01" value="${esc(t.rate)}"></div><label class="check-field"><input type="checkbox" name="archived"${t.archived ? ' checked' : ''}> Archived</label><div class="form-actions"><button class="button button-primary">Save</button></div></form></article>`).join('')}</div><form data-new-type class="form-grid"><div class="field"><label>New type</label><input class="input" name="name"></div><div class="field"><label>Default rate</label><input class="input" name="rate" type="number" min="0" step="0.01" value="0"></div><div class="form-actions full"><button class="button">Add Type</button></div></form></section>`; }
+function bindSettings() { ROOT.querySelector('[data-settings]')?.addEventListener('submit', e => { e.preventDefault(); const f = new FormData(e.currentTarget); data.settings.idleMinutes = Math.max(1, Number(f.get('idle') || IDLE_MINUTES)); data.settings.capSeconds = Math.max(60, Number(f.get('cap') || 10) * 3600); data.settings.updated = now(); save(true, 'Settings saved'); render(); }); ROOT.querySelectorAll('[data-type]').forEach(form => form.addEventListener('submit', e => { e.preventDefault(); const t = data.types.find(x => x.id === form.dataset.type); if (!t) return; const f = new FormData(form); t.name = String(f.get('name') || '').trim() || t.name; t.rate = Number(f.get('rate') || 0); t.archived = !!f.get('archived'); t.updated = now(); save(true, 'Project type saved'); render(); })); ROOT.querySelector('[data-new-type]')?.addEventListener('submit', e => { e.preventDefault(); const f = new FormData(e.currentTarget); const name = String(f.get('name') || '').trim(); if (!name) return; data.types.push({ id: id(), name, rate: Number(f.get('rate') || 0), archived: false, sort: Date.now(), updated: now(), deleted: null }); save(true, 'Project type added'); render(); }); }
+function syncNow() { if (!CFG.supabaseUrl || !CFG.supabaseAnonKey) { notice = 'Supabase is not configured yet. Use local mode for now.'; data.sync.message = 'Supabase config missing'; save(false); render(); return; } notice = 'Supabase config exists, but final sync should wait until we run and verify the tables.'; render(); }
+function render() { route = parseRoute(); if (route.project) { renderShell(renderProject(route.project)); bindProject(route.project); return; } if (route.tab === 'reports') { renderShell(renderReports()); bindReports(); return; } if (route.tab === 'stopwatch') { renderShell(renderStopwatch()); bindStopwatch(); return; } if (route.tab === 'countdown') { renderShell(renderCountdown()); bindCountdown(); return; } if (route.tab === 'timecode') { renderShell(renderTimecode()); bindTimecode(); return; } if (route.tab === 'settings') { renderShell(renderSettings()); bindSettings(); return; } renderShell(renderTimers()); bindTimers(); }
+window.addEventListener('hashchange', render); window.addEventListener('online', render); window.addEventListener('offline', render); if (!ROOT) throw new Error('Missing app root.'); activeTheme(); render(); setInterval(() => { if (running().length || stopwatch.running || countdown.running) render(); }, 1000);
