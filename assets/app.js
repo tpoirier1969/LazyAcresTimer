@@ -1,5 +1,5 @@
 const CFG = window.LAZY_TIMER_CONFIG || {};
-const APP_VERSION = CFG.appVersion || 'v0.1.2';
+const APP_VERSION = 'v0.1.2';
 const ROOT = document.querySelector('[data-app-root]');
 const STORE_PREFIX = 'lazy-acres-timer-v1';
 const PROFILE_KEY = 'lazy-acres-timer-profile';
