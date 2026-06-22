@@ -1,10 +1,8 @@
 // Public browser config for Lazy Acres Timer.
-// The Supabase URL and anon/publishable key are safe to use in the browser ONLY when Row Level Security is enabled.
+// These Supabase values are public client settings. They are safe in the browser ONLY when Row Level Security is enabled.
 // Never put a service_role key, database password, JWT secret, or other private key here.
 window.LAZY_TIMER_CONFIG = {
-  appVersion: 'v0.1.1',
-  versionUrl: './version.json',
-  supabaseUrl: '',
-  supabaseAnonKey: '',
+  supabaseUrl: 'https://wntakzfoprthwggkidyq.supabase.co',
+  supabaseAnonKey: 'sb_publishable_gWu_EQ1J3s0iNjeDeINJwQ_xKy8QgAJ',
   supabaseClientUrl: 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/+esm',
 };
